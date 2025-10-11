@@ -50,8 +50,19 @@ if uploaded_file:
                 st.error("⚠️ Could not detect all required columns (Item, Price, Paid Qty, Free Qty). Check PDF layout.")
             else:
                 df = df.rename(columns={v: k for k, v in col_map.items()})
-                for c in ["Original Price", "Paid Qty", "Free Qty"]:
-                    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+                import re
+
+def clean_number(x):
+    if isinstance(x, str):
+        x = re.sub(r"[^\d.]", "", x)  # removes commas, Rs., spaces etc.
+    try:
+        return float(x)
+    except:
+        return 0
+
+for c in ["Original Price", "Paid Qty", "Free Qty"]:
+    df[c] = df[c].apply(clean_number)
+
 
                 df["Discounted Unit Price"] = df["Original Price"] * discount_multiplier
                 df["Total Qty"] = df["Paid Qty"] + df["Free Qty"]

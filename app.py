@@ -1,141 +1,248 @@
+# app.py - Invoice Analyzer Pro v3 (Minimal: Item Name | Unit Price | Effective Unit Price)
 import streamlit as st
 import pandas as pd
 import pdfplumber
 from io import BytesIO
 import re
-import plotly.express as px
+import numpy as np
 
-# --- PAGE SETTINGS ---
-st.set_page_config(page_title="Invoice Analyzer Pro v2.0", layout="wide")
-st.title("📄 Invoice Analyzer Pro – Smart Discount & Rate Calculator")
+st.set_page_config(page_title="Invoice Analyzer Pro v3", layout="wide")
+st.title("📄 Invoice Analyzer Pro — V3 (Item | Unit Price | Effective Unit Price)")
 
 st.markdown("""
-### ⚙️ Features
-- Upload **any PDF invoice**
-- Auto-extract **Item Name, Price, Paid Qty, Free Qty**
-- Choose your **Discount %**
-- Calculates:
-  - ✅ Discounted Unit Price  
-  - ✅ Effective Rate  
-  - ✅ Total Quantity  
-- Search, visualize & export your data
+Upload a PDF invoice. The app will:
+- Auto-detect item name, price and quantity (if qty available)
+- Compute **Unit Price** (if price is total and qty exists, it will divide)
+- Apply discount and show **Effective Unit Price**
 """)
 
-# --- SIDEBAR HISTORY ---
-if "discount_history" not in st.session_state:
-    st.session_state["discount_history"] = []
+# ---------- helpers ----------
+def clean_number_raw(x):
+    """Return cleaned string of digits and dot, or empty string."""
+    if pd.isna(x):
+        return ""
+    s = str(x)
+    # keep digits and dot and minus
+    s = re.sub(r"[^\d.\-]", "", s)
+    # handle repeated dots like "1.234.56" -> keep first dot only
+    if s.count(".") > 1:
+        parts = s.split(".")
+        s = parts[0] + "." + "".join(parts[1:])
+    return s
 
-discount_percent = st.sidebar.number_input("💰 Discount Percentage", min_value=0.0, max_value=100.0, value=13.0, step=0.5)
-if discount_percent not in st.session_state["discount_history"]:
-    st.session_state["discount_history"].insert(0, discount_percent)
-    if len(st.session_state["discount_history"]) > 5:
-        st.session_state["discount_history"].pop()
-
-st.sidebar.markdown("### 🕓 Recent Discounts")
-for d in st.session_state["discount_history"]:
-    st.sidebar.write(f"{d}%")
-
-discount_multiplier = (100 - discount_percent) / 100
-
-# --- FILE UPLOAD ---
-uploaded_file = st.file_uploader("📤 Upload PDF Invoice", type=["pdf"])
-
-def clean_number(x):
-    if isinstance(x, str):
-        x = re.sub(r"[^\d.]", "", x)
+def to_float_safe(x):
     try:
-        return float(x)
+        s = clean_number_raw(x)
+        if s == "":
+            return np.nan
+        return float(s)
     except:
-        return 0
+        return np.nan
+
+def column_numeric_stats(series):
+    vals = series.map(to_float_safe)
+    num_non_na = vals.notna().sum()
+    total = len(series)
+    prop_numeric = (num_non_na / total) if total>0 else 0
+    median = float(np.nanmedian(vals)) if num_non_na>0 else np.nan
+    std = float(np.nanstd(vals)) if num_non_na>0 else np.nan
+    return prop_numeric, median, std, vals
+
+def choose_item_column(df):
+    # choose the column with lowest numeric proportion and highest average string length
+    best_col = None
+    best_score = -999
+    for col in df.columns:
+        series = df[col].astype(str).fillna("")
+        prop_num, _, _, _ = column_numeric_stats(series)
+        avg_len = series.map(len).mean()
+        score = (1 - prop_num) * 0.6 + (avg_len / 100) * 0.4
+        if score > best_score:
+            best_score = score
+            best_col = col
+    return best_col, best_score
+
+def choose_price_column(df):
+    # choose column with highest numeric proportion and median > 0
+    best_col = None
+    best_prop = -1
+    for col in df.columns:
+        prop_num, median, std, vals = column_numeric_stats(df[col])
+        if prop_num > best_prop and (not np.isnan(median)) and median > 0:
+            best_prop = prop_num
+            best_col = col
+    return best_col, best_prop
+
+def choose_qty_column(df, exclude_cols=[]):
+    # choose column with numeric ints and small median (practical qty)
+    best_col = None
+    best_score = -1
+    for col in df.columns:
+        if col in exclude_cols: 
+            continue
+        prop_num, median, std, vals = column_numeric_stats(df[col])
+        if prop_num < 0.3:
+            continue
+        # prefer columns with integer-like median and moderate size
+        score = prop_num
+        if not np.isnan(median) and median < 10000:  # heuristic
+            score += 0.5
+        if not np.isnan(std) and std < median*2 + 1:
+            score += 0.2
+        if score > best_score:
+            best_score = score
+            best_col = col
+    return best_col, best_score
+
+# ---------- UI ----------
+uploaded_file = st.file_uploader("📤 Upload PDF Invoice (single file)", type=["pdf"])
+discount_percent = st.number_input("💰 Discount Percentage (applies to unit price)", min_value=0.0, max_value=100.0, value=13.0, step=0.5)
+discount_multiplier = (100 - discount_percent) / 100
 
 if uploaded_file:
     try:
-        st.info("🔍 Extracting data from your PDF... Please wait.")
+        st.info("🔍 Reading PDF and extracting tables...")
         df_list = []
-
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
-                table = page.extract_table()
-                if table:
-                    df_list.append(pd.DataFrame(table[1:], columns=table[0]))
+                # extract multiple tables per page if present
+                tables = page.extract_tables()
+                if tables:
+                    for t in tables:
+                        if not t or len(t) < 2:
+                            continue
+                        header = [str(h).strip() for h in t[0]]
+                        rows = t[1:]
+                        if len(rows) == 0:
+                            continue
+                        temp = pd.DataFrame(rows, columns=header)
+                        df_list.append(temp)
 
         if not df_list:
-            st.error("❌ No table found. Make sure your PDF contains a proper invoice table.")
+            st.error("❌ No tables detected in PDF. Try a different invoice (or a clearer PDF).")
         else:
-            df = pd.concat(df_list, ignore_index=True)
-            df.columns = [c.strip().title() for c in df.columns]
+            raw = pd.concat(df_list, ignore_index=True)
+            # normalize headers
+            raw.columns = [str(c).strip() for c in raw.columns]
+            raw.replace("", pd.NA, inplace=True)
 
-            # --- DETECT COLUMNS ---
-            col_map = {}
-            for col in df.columns:
-                col_low = col.lower()
-                if "item" in col_low or "name" in col_low:
-                    col_map["Item Name"] = col
-                elif "price" in col_low or "rate" in col_low or "amount" in col_low:
-                    col_map["Original Price"] = col
-                elif "qty" in col_low and "free" not in col_low:
-                    col_map["Paid Qty"] = col
-                elif "free" in col_low:
-                    col_map["Free Qty"] = col
+            # drop columns that are completely empty
+            raw = raw.loc[:, raw.notna().any(axis=0)]
 
-            missing = [x for x in ["Item Name", "Original Price", "Paid Qty", "Free Qty"] if x not in col_map]
-            if missing:
-                st.warning(f"⚠️ Missing columns detected: {', '.join(missing)} — trying to continue anyway.")
-                for m in missing:
-                    df[m] = 0
+            # basic cleanup rows that are all null/empty
+            raw = raw[~(raw.isna().all(axis=1))]
+            raw = raw.reset_index(drop=True)
 
-            df = df.rename(columns={v: k for k, v in col_map.items() if v in df.columns})
+            # Auto-detect columns
+            item_col, item_conf = choose_item_column(raw)
+            price_col, price_conf = choose_price_column(raw)
+            qty_col, qty_conf = choose_qty_column(raw, exclude_cols=[item_col, price_col])
 
-            # --- CLEAN DATA ---
-            for c in ["Original Price", "Paid Qty", "Free Qty"]:
-                df[c] = df[c].apply(clean_number)
+            st.write("### 🔎 Auto-detected columns (confidence)")
+            st.write(f"- Item column: **{item_col}** (score {item_conf:.2f})")
+            st.write(f"- Price column: **{price_col}** (prop {price_conf:.2f})")
+            st.write(f"- Qty column: **{qty_col}** (score {qty_conf:.2f})")
 
-            df = df[df["Item Name"].astype(str).str.strip() != ""]
-            df = df.fillna(0)
+            manual_override_needed = False
+            # if confidence low, allow manual mapping
+            if price_conf < 0.4 or item_conf < 0.4:
+                manual_override_needed = True
 
-            # --- CALCULATIONS ---
-            df["Discounted Unit Price"] = df["Original Price"] * discount_multiplier
-            df["Total Qty"] = df["Paid Qty"] + df["Free Qty"]
-            df["Effective Rate"] = (df["Paid Qty"] * df["Discounted Unit Price"]) / df["Total Qty"]
-            df["Total Value"] = df["Paid Qty"] * df["Discounted Unit Price"]
-            df = df.round(2)
+            st.markdown("---")
+            st.write("If auto-detection seems wrong, choose columns manually below (press Apply):")
 
-            # --- SEARCH BAR ---
-            search = st.text_input("🔎 Search Item Name")
-            if search:
-                df = df[df["Item Name"].astype(str).str.contains(search, case=False, na=False)]
+            cols = list(raw.columns)
+            sel_item = st.selectbox("Select Item Name column", options=["--Auto--"] + cols, index=0)
+            sel_price = st.selectbox("Select Price column (may be unit or total)", options=["--Auto--"] + cols, index=0)
+            sel_qty = st.selectbox("Select Quantity column (if available)", options=["--Auto--"] + ["None"] + cols, index=0)
 
-            # --- DISPLAY TABLE ---
-            st.success("✅ Invoice Processed Successfully!")
-            st.dataframe(df, use_container_width=True)
+            if sel_item != "--Auto--":
+                item_col = sel_item
+            if sel_price != "--Auto--":
+                price_col = sel_price
+            if sel_qty != "--Auto--" and sel_qty != "None":
+                qty_col = sel_qty
+            elif sel_qty == "None":
+                qty_col = None
 
-            # --- DOWNLOADS ---
-            excel_output = BytesIO()
-            csv_output = BytesIO()
-            df.to_excel(excel_output, index=False)
-            df.to_csv(csv_output, index=False)
-            excel_output.seek(0)
-            csv_output.seek(0)
+            if not item_col or not price_col:
+                st.error("Item or Price column not detected. Please select them manually above.")
+            else:
+                # Create working df
+                work = pd.DataFrame()
+                work["Item Name"] = raw[item_col].astype(str).fillna("").map(lambda s: s.strip())
+                work["Price_Raw"] = raw[price_col]
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button("📥 Download Excel", data=excel_output, file_name="invoice_analysis.xlsx")
-            with col2:
-                st.download_button("📄 Download CSV", data=csv_output, file_name="invoice_analysis.csv")
+                if qty_col:
+                    work["Qty_Raw"] = raw[qty_col]
+                else:
+                    work["Qty_Raw"] = pd.NA
 
-            # --- SUMMARY ---
-            st.markdown("### 📊 Summary")
-            st.write(f"**Discount Applied:** {discount_percent}%")
-            st.write(f"**Total Items:** {len(df)}")
-            st.write(f"**Total Paid Qty:** {df['Paid Qty'].sum():,.0f}")
-            st.write(f"**Total Free Qty:** {df['Free Qty'].sum():,.0f}")
-            st.write(f"**Total Value (After Discount):** Rs. {df['Total Value'].sum():,.2f}")
+                # Clean numeric conversions
+                work["Price_Num"] = work["Price_Raw"].map(to_float_safe)
+                work["Qty_Num"] = work["Qty_Raw"].map(lambda x: int(to_float_safe(x)) if not pd.isna(to_float_safe(x)) else np.nan)
 
-            # --- CHART ---
-            chart_data = df.groupby("Item Name")[["Paid Qty", "Free Qty"]].sum().reset_index()
-            fig = px.bar(chart_data, x="Item Name", y=["Paid Qty", "Free Qty"], barmode="group",
-                         title="📈 Paid vs Free Quantity per Item")
-            st.plotly_chart(fig, use_container_width=True)
+                # Heuristic: if price looks like total (many prices >> qty) and qty exists -> compute unit price = Price/Qty
+                unit_prices = []
+                use_division = False
+                if work["Qty_Num"].notna().sum() > 0:
+                    # compute price/qty where possible
+                    ratios = []
+                    for p, q in zip(work["Price_Num"], work["Qty_Num"]):
+                        if not pd.isna(p) and not pd.isna(q) and q != 0:
+                            ratios.append(p / q)
+                    if len(ratios) >= 1:
+                        median_ratio = np.median(ratios)
+                        std_ratio = np.std(ratios)
+                        # if median_ratio is reasonable and ratios have low relative std -> implies Price was total
+                        if std_ratio / (median_ratio + 1e-9) < 0.6:
+                            use_division = True
+                # compute unit price
+                def compute_unit(p, q):
+                    if pd.isna(p):
+                        return np.nan
+                    if use_division and (not pd.isna(q)) and q != 0:
+                        return p / q
+                    else:
+                        return p
+
+                work["Unit_Price_Raw"] = work.apply(lambda r: compute_unit(r["Price_Num"], r["Qty_Num"]), axis=1)
+
+                # final numeric cleaning and rounding
+                work["Unit Price"] = work["Unit_Price_Raw"].map(lambda x: round(float(x), 2) if not pd.isna(x) else 0.0)
+                work["Effective Unit Price"] = (work["Unit Price"] * discount_multiplier).map(lambda x: round(float(x), 2))
+
+                # Remove empty items
+                work = work[work["Item Name"].str.strip() != ""].reset_index(drop=True)
+
+                # If everything zeros or suspicious, show raw for debugging
+                if work["Unit Price"].sum() == 0:
+                    st.warning("⚠️ Detected that all Unit Prices are 0 — please check column mappings or upload a clearer invoice PDF.")
+                    st.write("Raw extracted table (first 20 rows):")
+                    st.dataframe(raw.head(20), use_container_width=True)
+
+                # Final output (only required 3 columns)
+                result = work[["Item Name", "Unit Price", "Effective Unit Price"]].copy()
+                # tidy types
+                result["Unit Price"] = result["Unit Price"].astype(float)
+                result["Effective Unit Price"] = result["Effective Unit Price"].astype(float)
+
+                st.markdown("### ✅ Result (clean)")
+                st.dataframe(result, use_container_width=True)
+
+                # Downloads
+                excel_buffer = BytesIO()
+                csv_buffer = BytesIO()
+                result.to_excel(excel_buffer, index=False, sheet_name="InvoiceV3")
+                result.to_csv(csv_buffer, index=False)
+                excel_buffer.seek(0)
+                csv_buffer.seek(0)
+
+                colx, coly = st.columns([1,1])
+                with colx:
+                    st.download_button("📥 Download Excel (.xlsx)", data=excel_buffer, file_name="invoice_v3.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                with coly:
+                    st.download_button("📄 Download CSV", data=csv_buffer, file_name="invoice_v3.csv", mime="text/csv")
 
     except Exception as e:
         st.error(f"⚠️ Error while processing PDF: {e}")

@@ -266,9 +266,10 @@ if uploaded_file:
         # Export to Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_final[display_cols].to_excel(writer, index=False, sheet_name="Invoice Analysis")
-            writer.save()
-        buffer.seek(0)
+    df_final[display_cols].to_excel(writer, index=False, sheet_name="Invoice Analysis")
+
+buffer.seek(0)
+
 
         st.download_button(
             label="📥 Download Excel (.xlsx)",

@@ -61,17 +61,12 @@ def apply_discount_and_rate(df, discount_percent):
 
 # ----------------- Streamlit UI -----------------
 
-st.set_page_config(page_title="Invoice Analyzer Pro", layout="wide")
+st.set_page_config(page_title="IAP", layout="wide")
 
 st.title("📊 Invoice Analyzer Pro – Final Version")
-st.caption("Made by Adil 🔥 | Accurate regex extraction for invoices like Al Rehman Traders")
+st.caption("MADE BY ADIL | AL REHMAN TRADERS")
 
-st.markdown("""
-Upload your **PDF invoice**, and the app will:
-- Extract Item Name, Paid Qty, Free Qty, Unit Rate & Total  
-- Apply **13% discount (default)**  
-- Calculate **Discounted Unit Price** and **Effective Rate**
-""")
+st.markdown("Upload your **PDF invoice**")
 
 discount_percent = st.number_input("💰 Discount Percentage", min_value=0.0, max_value=100.0, value=13.0, step=0.5)
 uploaded = st.file_uploader("📤 Upload Invoice PDF", type=["pdf"])

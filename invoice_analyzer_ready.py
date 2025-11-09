@@ -63,7 +63,7 @@ def apply_discount_and_rate(df, discount_percent):
 
 st.set_page_config(page_title="IAP", layout="wide")
 
-st.title("📊 Invoice Analyzer Pro – Final Version")
+st.title("IAP")
 st.caption("MADE BY ADIL | AL REHMAN TRADERS")
 
 st.markdown("Upload your **PDF invoice**")
